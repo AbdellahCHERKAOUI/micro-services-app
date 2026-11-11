@@ -1,0 +1,112 @@
+x-spring-env: &spring-env
+  SPRING_CONFIG_IMPORT: optional:configserver:http://config-service:9999
+  EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://discovery-service:8761/eureka
+  JAVA_TOOL_OPTIONS: -Xmx300m -XX:+UseSerialGC
+
+x-build: &build
+  context: .
+  dockerfile: Dockerfile
+
+services:
+
+  config-service:
+    build: { <<: *build, args: { MODULE: config-service } }
+    ports: ["9999:9999"]
+    environment:
+      JAVA_TOOL_OPTIONS: -Xmx300m -XX:+UseSerialGC
+      SPRING_PROFILES_ACTIVE: native
+      SPRING_CLOUD_CONFIG_SERVER_NATIVE_SEARCHLOCATIONS: file:/config-repo
+    volumes: ["./config-repo:/config-repo:ro"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9999/actuator/health | grep -q UP"]
+      interval: 10s
+      retries: 12
+      start_period: 30s
+
+  discovery-service:
+    build: { <<: *build, args: { MODULE: discovery-service } }
+    ports: ["8761:8761"]
+    environment:
+      JAVA_TOOL_OPTIONS: -Xmx300m -XX:+UseSerialGC
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8761/actuator/health | grep -q UP"]
+      interval: 10s
+      retries: 12
+      start_period: 30s
+
+  customer-service:
+    build: { <<: *build, args: { MODULE: customer-service } }
+    ports: ["8081:8081"]
+    environment: *spring-env
+    depends_on:
+      config-service: { condition: service_healthy }
+      discovery-service: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8081/actuator/health | grep -q UP"]
+      interval: 10s
+      retries: 12
+      start_period: 40s
+
+  inventory-service:
+    build: { <<: *build, args: { MODULE: inventory-service } }
+    ports: ["8082:8082"]
+    environment: *spring-env
+    depends_on:
+      config-service: { condition: service_healthy }
+      discovery-service: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8082/actuator/health | grep -q UP"]
+      interval: 10s
+      retries: 12
+      start_period: 40s
+
+  billing-service:
+    build: { <<: *build, args: { MODULE: billing-service } }
+    ports: ["8083:8083"]
+    environment: *spring-env
+    depends_on:
+      customer-service: { condition: service_healthy }
+      inventory-service: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8083/actuator/health | grep -q UP"]
+      interval: 10s
+      retries: 12
+      start_period: 40s
+
+  gateway-service:
+    build: { <<: *build, args: { MODULE: gateway-service } }
+    ports: ["8888:8888"]
+    environment: *spring-env
+    depends_on:
+      customer-service: { condition: service_healthy }
+      inventory-service: { condition: service_healthy }
+      billing-service: { condition: service_healthy }
+
+  ai-agent-service:
+    build: { <<: *build, args: { MODULE: ai-agent-service } }
+    ports: ["8090:8090"]
+    environment:
+      <<: *spring-env
+      SPRING_AI_OLLAMA_BASE_URL: http://host.docker.internal:11434
+      SPRING_AI_MCP_CLIENT_SSE_CONNECTIONS_CUSTOMER_URL: http://customer-service:8081
+      SPRING_AI_MCP_CLIENT_SSE_CONNECTIONS_INVENTORY_URL: http://inventory-service:8082
+      SPRING_AI_MCP_CLIENT_SSE_CONNECTIONS_BILLING_URL: http://billing-service:8083
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on:
+      customer-service: { condition: service_healthy }
+      inventory-service: { condition: service_healthy }
+      billing-service: { condition: service_healthy }
+
+  telegram-bot:
+    profiles: ["telegram"]
+    build: { <<: *build, args: { MODULE: telegram-bot } }
+    environment:
+      JAVA_TOOL_OPTIONS: -Xmx200m -XX:+UseSerialGC
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      AGENT_URL: http://ai-agent-service:8090
+    depends_on: [ai-agent-service]
+
+  angular-client:
+    build: ./billing-client/billing-client
+    ports: ["4200:80"]
+    depends_on: [gateway-service]
